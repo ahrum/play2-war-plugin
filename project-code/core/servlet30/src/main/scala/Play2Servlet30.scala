@@ -4,9 +4,14 @@ import javax.servlet._
 import javax.servlet.annotation._
 import javax.servlet.http._
 import java.io._
+import java.net.URL
 import java.util.concurrent.atomic._
 import java.util.Arrays
+import java.util.jar.JarFile
 
+import org.jboss.vfs.VirtualFile
+import org.reflections.ReflectionsException
+import org.reflections.vfs._
 import play.api._
 import play.api.mvc._
 import play.api.http._
@@ -28,6 +33,58 @@ object Play2Servlet {
 @WebServlet(name = "Play", urlPatterns = Array { "/" }, asyncSupported = true)
 @WebListener
 class Play2Servlet extends play.core.server.servlet.Play2Servlet[Tuple2[AsyncContext, AsyncListener]] with Helpers {
+
+  override def contextInitialized(e: ServletContextEvent) = {
+
+    Vfs.addDefaultURLTypes(
+      new Vfs.UrlType() {
+        override def matches(url: URL) = {
+          url.getProtocol.equals("vfs")
+        }
+
+        override def createDir(url: URL): Vfs.Dir = {
+          var content: VirtualFile = {
+            try {
+              url.openConnection.getContent.asInstanceOf[VirtualFile]
+            } catch {
+              case e: Throwable => throw new ReflectionsException("could not open url connection as VirtualFile [" + url + "]", e)
+            }
+          }
+
+          val dir = {
+            try {
+              val firstDir = createDir(new java.io.File(content.getPhysicalFile.getParentFile, content.getName))
+
+              firstDir.orElse(createDir(content.getPhysicalFile))
+            } catch {
+              case e: Throwable => None
+            }
+          }
+
+          dir.getOrElse(null)
+        }
+
+        def createDir(file: java.io.File): Option[Vfs.Dir] = {
+          try {
+            if (file.exists() && file.canRead()) {
+              if (file.isDirectory()) {
+                Option(new SystemDir(file))
+              } else {
+                Option(new ZipDir(new JarFile(file)))
+              }
+            } else {
+              None
+            }
+          } catch {
+            // TODO : log
+            case e: IOException => None
+          }
+        }
+      });
+
+    // Then init main Servlet
+    super.contextInitialized(e)
+  }
 
   protected override def onBeginService(request: HttpServletRequest, response: HttpServletResponse): Tuple2[AsyncContext, AsyncListener] = {
     val asyncListener = new AsyncListener(request.toString)
@@ -91,7 +148,7 @@ private[servlet30] class AsyncListener(val requestId: String) extends javax.serv
   val withError = new AtomicBoolean(false)
 
   val withTimeout = new AtomicBoolean(false)
-  
+
   // Need a default constructor for JBoss
   def this() = this("Unknown request id")
 
